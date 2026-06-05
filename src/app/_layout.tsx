@@ -1,13 +1,31 @@
 import { useEffect } from 'react';
-import { ActivityIndicator, View } from 'react-native';
+import { ActivityIndicator, View, Linking } from 'react-native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider, useAuth } from '../contexts/auth';
+import { supabase } from '../lib/supabase';
 
 function RootLayoutNav() {
   const { session, loading } = useAuth();
   const segments = useSegments();
   const router = useRouter();
+
+  // Handle email confirmation deep links (cleanup://...)
+  useEffect(() => {
+    const handleUrl = async ({ url }: { url: string }) => {
+      const fragment = url.split('#')[1] ?? url.split('?')[1] ?? '';
+      const params = new URLSearchParams(fragment);
+      const accessToken = params.get('access_token');
+      const refreshToken = params.get('refresh_token');
+      if (accessToken && refreshToken) {
+        await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+      }
+    };
+
+    Linking.getInitialURL().then((url) => { if (url) handleUrl({ url }); });
+    const sub = Linking.addEventListener('url', handleUrl);
+    return () => sub.remove();
+  }, []);
 
   useEffect(() => {
     if (loading) return;
