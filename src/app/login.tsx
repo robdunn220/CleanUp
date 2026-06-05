@@ -19,6 +19,23 @@ export default function LoginScreen() {
       return;
     }
     setLoading(true);
+
+    // Debug: log the URL and raw response before using the SDK
+    const url = process.env.EXPO_PUBLIC_SUPABASE_URL;
+    const key = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+    console.log('[DEBUG] Supabase URL:', url);
+    try {
+      const raw = await fetch(`${url}/auth/v1/token?grant_type=password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: key! },
+        body: JSON.stringify({ email, password }),
+      });
+      const text = await raw.text();
+      console.log('[DEBUG] Raw response:', text.slice(0, 200));
+    } catch (e: any) {
+      console.log('[DEBUG] Fetch error:', e.message);
+    }
+
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) Alert.alert('Login failed', error.message);
     setLoading(false);
