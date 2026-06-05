@@ -1,15 +1,46 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
-import { useColorScheme } from 'react-native';
+import { useEffect } from 'react';
+import { ActivityIndicator, View } from 'react-native';
+import { Stack, useRouter, useSegments } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import { AuthProvider, useAuth } from '../contexts/auth';
 
-import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import AppTabs from '@/components/app-tabs';
+function RootLayoutNav() {
+  const { session, loading } = useAuth();
+  const segments = useSegments();
+  const router = useRouter();
 
-export default function TabLayout() {
-  const colorScheme = useColorScheme();
+  useEffect(() => {
+    if (loading) return;
+    const segs = segments as string[];
+    const inLogin = segs[0] === 'login';
+    const inTabs = segs[0] === 'tabs';
+    if (!session && !inLogin) {
+      router.replace('/login' as any);
+    } else if (session && (inLogin || segs[0] === undefined)) {
+      router.replace('/tabs' as any);
+    }
+  }, [session, loading, segments]);
+
+  if (loading) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#208AEF' }}>
+        <ActivityIndicator size="large" color="#fff" />
+      </View>
+    );
+  }
+
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
-    </ThemeProvider>
+    <>
+      <StatusBar style="dark" />
+      <Stack screenOptions={{ headerShown: false }} />
+    </>
+  );
+}
+
+export default function RootLayout() {
+  return (
+    <AuthProvider>
+      <RootLayoutNav />
+    </AuthProvider>
   );
 }
