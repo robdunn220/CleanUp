@@ -36,4 +36,10 @@ export type EventAttendee = {
   event_id: string;
   user_id: string;
   joined_at: string;
+  muted: boolean;
+};
+
+export type AttendeeRow = {
+  profile: Profile;
+  muted: boolean;
 };

@@ -1,22 +1,36 @@
+import { useEffect } from 'react';
 import { Tabs } from 'expo-router';
-import { View, StyleSheet } from 'react-native';
-
-function TabIcon({ focused, children }: { focused: boolean; children: string }) {
-  return (
-    <View style={[styles.iconWrap, focused && styles.iconWrapActive]}>
-      <View>
-        {/* emoji icons — swap for @expo/vector-icons if preferred */}
-      </View>
-    </View>
-  );
-}
+import { StyleSheet, Platform } from 'react-native';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import Constants from 'expo-constants';
 
 export default function TabsLayout() {
+  useEffect(() => {
+    // expo-notifications was removed from Expo Go on Android in SDK 53.
+    // Skip entirely when running in Expo Go; works in dev/production builds.
+    if (Constants.appOwnership === 'expo') return;
+
+    async function setupNotifications() {
+      const Notifications = await import('expo-notifications');
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync('default', {
+          name: 'Default',
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+        });
+      }
+      await Notifications.requestPermissionsAsync({
+        ios: { allowAlert: true, allowBadge: true, allowSound: true },
+      });
+    }
+    setupNotifications();
+  }, []);
+
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: '#208AEF',
+        tabBarActiveTintColor: '#5CB85C',
         tabBarInactiveTintColor: '#8E8E93',
         tabBarStyle: styles.tabBar,
         tabBarLabelStyle: styles.tabLabel,
@@ -24,27 +38,34 @@ export default function TabsLayout() {
     >
       <Tabs.Screen
         name="index"
-        options={{ title: 'Events', tabBarIcon: ({ color }) => <TabEmoji emoji="📍" color={color} /> }}
+        options={{
+          title: 'Events',
+          tabBarIcon: ({ color }) => <MaterialCommunityIcons name="broom" size={24} color={color} />,
+        }}
       />
       <Tabs.Screen
         name="calendar"
-        options={{ title: 'Calendar', tabBarIcon: ({ color }) => <TabEmoji emoji="📅" color={color} /> }}
+        options={{
+          title: 'Calendar',
+          tabBarIcon: ({ color }) => <Ionicons name="calendar" size={23} color={color} />,
+        }}
       />
       <Tabs.Screen
         name="messages"
-        options={{ title: 'Messages', tabBarIcon: ({ color }) => <TabEmoji emoji="💬" color={color} /> }}
+        options={{
+          title: 'Messages',
+          tabBarIcon: ({ color }) => <Ionicons name="chatbubble" size={22} color={color} />,
+        }}
       />
       <Tabs.Screen
         name="profile"
-        options={{ title: 'Profile', tabBarIcon: ({ color }) => <TabEmoji emoji="👤" color={color} /> }}
+        options={{
+          title: 'Profile',
+          tabBarIcon: ({ color }) => <Ionicons name="person" size={23} color={color} />,
+        }}
       />
     </Tabs>
   );
-}
-
-function TabEmoji({ emoji, color }: { emoji: string; color: import('react-native').ColorValue }) {
-  const { Text } = require('react-native');
-  return <Text style={{ fontSize: 22, opacity: color === '#208AEF' ? 1 : 0.55 }}>{emoji}</Text>;
 }
 
 const styles = StyleSheet.create({
@@ -56,6 +77,4 @@ const styles = StyleSheet.create({
     paddingBottom: 8,
   },
   tabLabel: { fontSize: 11, fontWeight: '600' },
-  iconWrap: { padding: 4, borderRadius: 8 },
-  iconWrapActive: { backgroundColor: '#E6F4FE' },
 });

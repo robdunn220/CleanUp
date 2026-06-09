@@ -1,15 +1,16 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
-  RefreshControl, ActivityIndicator, Alert,
+  RefreshControl, ActivityIndicator, Alert, TextInput,
 } from 'react-native';
 import { useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/auth';
 import type { CleanupEvent } from '../../types';
 
-const RADIUS_KM = 80;
+const MAX_RADIUS_KM = 50 * 1.60934; // 50 miles cap for initial fetch
 
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
   const R = 6371;
@@ -24,7 +25,8 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
 }
 
 function distanceLabel(km: number) {
-  return km < 1 ? `${Math.round(km * 1000)} m away` : `${km.toFixed(1)} km away`;
+  const mi = km * 0.621371;
+  return mi < 0.1 ? `${Math.round(mi * 5280)} ft away` : `${mi.toFixed(1)} mi away`;
 }
 
 function formatDate(iso: string) {
@@ -40,24 +42,56 @@ export default function EventsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [location, setLocation] = useState<{ lat: number; lon: number } | null>(null);
   const [locationError, setLocationError] = useState(false);
+  const [sortBy, setSortBy] = useState<'date' | 'distance'>('date');
+  const [radiusMi, setRadiusMi] = useState(50);
+
+  function adjustRadius(delta: number) {
+    setRadiusMi((prev) => Math.min(50, Math.max(1, prev + delta)));
+  }
+
+  function handleRadiusInput(text: string) {
+    const n = parseInt(text, 10);
+    if (!isNaN(n)) setRadiusMi(Math.min(50, Math.max(1, n)));
+  }
 
   useEffect(() => {
+    let cancelled = false;
+    const timeout = setTimeout(() => {
+      if (!cancelled) setLocationError(true);
+    }, 5000);
+
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
+      if (cancelled) return;
       if (status !== 'granted') {
+        clearTimeout(timeout);
         setLocationError(true);
-        setLoading(false);
         return;
       }
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      setLocation({ lat: loc.coords.latitude, lon: loc.coords.longitude });
+      try {
+        const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        if (!cancelled) {
+          clearTimeout(timeout);
+          setLocation({ lat: loc.coords.latitude, lon: loc.coords.longitude });
+        }
+      } catch {
+        if (!cancelled) {
+          clearTimeout(timeout);
+          setLocationError(true);
+        }
+      }
     })();
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
   }, []);
 
   const fetchEvents = useCallback(async () => {
     const { data, error } = await supabase
       .from('events')
-      .select('*, profiles(id, username), event_attendees(user_id)')
+      .select('*, profiles!created_by(id, username), event_attendees(user_id)')
       .gte('date', new Date().toISOString())
       .order('date', { ascending: true });
 
@@ -73,10 +107,9 @@ export default function EventsScreen() {
     }));
 
     const nearby = location
-      ? enriched.filter((e) => e.distance != null && e.distance <= RADIUS_KM)
+      ? enriched.filter((e) => e.distance != null && e.distance <= MAX_RADIUS_KM)
       : enriched;
 
-    nearby.sort((a, b) => (a.distance ?? Infinity) - (b.distance ?? Infinity));
     setEvents(nearby);
   }, [location, user?.id]);
 
@@ -92,10 +125,19 @@ export default function EventsScreen() {
     setRefreshing(false);
   }, [fetchEvents]);
 
+  const sortedEvents = useMemo(() => {
+    if (sortBy === 'distance') {
+      const radiusKm = radiusMi * 1.60934;
+      const filtered = events.filter((e) => e.distance != null && e.distance <= radiusKm);
+      return filtered.sort((a, b) => (a.distance ?? Infinity) - (b.distance ?? Infinity));
+    }
+    return [...events].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  }, [events, sortBy, radiusMi]);
+
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" color="#208AEF" />
+        <ActivityIndicator size="large" color="#5CB85C" />
         <Text style={styles.loadingText}>Finding events near you…</Text>
       </View>
     );
@@ -110,32 +152,86 @@ export default function EventsScreen() {
         </TouchableOpacity>
       </View>
 
+      <View style={styles.sortRow}>
+        {(['date', 'distance'] as const).map((opt) => {
+          const disabled = opt === 'distance' && !location;
+          const iconColor = sortBy === opt && !disabled ? '#5CB85C' : '#8E8E93';
+          return (
+            <TouchableOpacity
+              key={opt}
+              style={[styles.sortBtn, sortBy === opt && styles.sortBtnActive, disabled && styles.sortBtnDisabled]}
+              onPress={() => !disabled && setSortBy(opt)}
+              activeOpacity={disabled ? 1 : 0.7}
+            >
+              <View style={styles.sortBtnInner}>
+                <Ionicons name={opt === 'date' ? 'calendar' : 'location'} size={14} color={iconColor} />
+                <Text style={[styles.sortBtnText, sortBy === opt && styles.sortBtnTextActive, disabled && styles.sortBtnTextDisabled]}>
+                  {opt === 'date' ? 'By Date' : 'By Distance'}
+                </Text>
+              </View>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+
+      {sortBy === 'distance' && location && (
+        <View style={styles.radiusRow}>
+          <Text style={styles.radiusLabel}>Within</Text>
+          <TouchableOpacity style={styles.radiusStepBtn} onPress={() => adjustRadius(-5)}>
+            <Text style={styles.radiusStepText}>−</Text>
+          </TouchableOpacity>
+          <TextInput
+            style={styles.radiusInput}
+            value={String(radiusMi)}
+            onChangeText={handleRadiusInput}
+            keyboardType="number-pad"
+            maxLength={2}
+            selectTextOnFocus
+          />
+          <Text style={styles.radiusMiText}>mi</Text>
+          <TouchableOpacity style={styles.radiusStepBtn} onPress={() => adjustRadius(5)}>
+            <Text style={styles.radiusStepText}>+</Text>
+          </TouchableOpacity>
+          <Text style={styles.radiusMax}>(max 50)</Text>
+        </View>
+      )}
+
       {locationError && (
         <View style={styles.banner}>
-          <Text style={styles.bannerText}>📍 Location unavailable — showing all upcoming events</Text>
+          <Ionicons name="location" size={14} color="#5CB85C" />
+          <Text style={styles.bannerText}>Location unavailable — showing all upcoming events</Text>
         </View>
       )}
 
       <FlatList
-        data={events}
+        data={sortedEvents}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.list}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#208AEF" />}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#5CB85C" />}
         renderItem={({ item }) => (
           <TouchableOpacity style={styles.card} onPress={() => router.push(`/events/${item.id}` as any)}>
             <View style={styles.cardTop}>
               <Text style={styles.cardTitle}>{item.title}</Text>
               {item.is_attending && <View style={styles.badge}><Text style={styles.badgeText}>Joined</Text></View>}
             </View>
-            <Text style={styles.cardMeta}>📅 {formatDate(item.date)}</Text>
-            <Text style={styles.cardMeta}>📍 {item.location_name}</Text>
+            <View style={styles.cardMetaRow}>
+              <Ionicons name="calendar" size={14} color="#5CB85C" />
+              <Text style={styles.cardMeta}>{formatDate(item.date)}</Text>
+            </View>
+            <View style={styles.cardMetaRow}>
+              <Ionicons name="location" size={14} color="#5CB85C" />
+              <Text style={styles.cardMeta}>{item.location_name}</Text>
+            </View>
             {item.distance != null && (
               <Text style={styles.cardDistance}>{distanceLabel(item.distance)}</Text>
             )}
             {item.event_attendees && (
-              <Text style={styles.cardAttendees}>
-                👥 {item.event_attendees.length} attendee{item.event_attendees.length !== 1 ? 's' : ''}
-              </Text>
+              <View style={styles.cardAttendeesRow}>
+                <Ionicons name="people" size={14} color="#5CB85C" />
+                <Text style={styles.cardAttendees}>
+                  {item.event_attendees.length} attendee{item.event_attendees.length !== 1 ? 's' : ''}
+                </Text>
+              </View>
             )}
           </TouchableOpacity>
         )}
@@ -167,9 +263,44 @@ const styles = StyleSheet.create({
     borderBottomColor: '#E5E5EA',
   },
   header: { fontSize: 26, fontWeight: '800', color: '#1C1C1E' },
-  createBtn: { backgroundColor: '#208AEF', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8 },
+  createBtn: { backgroundColor: '#5CB85C', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8 },
   createBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
-  banner: { backgroundColor: '#FFF3CD', padding: 10, paddingHorizontal: 16 },
+  sortRow: {
+    flexDirection: 'row', gap: 8, paddingHorizontal: 16, paddingVertical: 10,
+    backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#E5E5EA',
+  },
+  sortBtn: {
+    flex: 1, paddingVertical: 8, borderRadius: 10, alignItems: 'center',
+    backgroundColor: '#F2F2F7', borderWidth: 1, borderColor: '#E5E5EA',
+  },
+  sortBtnActive: { backgroundColor: '#E8F5E9', borderColor: '#5CB85C' },
+  sortBtnDisabled: { opacity: 0.4 },
+  sortBtnInner: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  sortBtnText: { fontSize: 13, fontWeight: '600', color: '#8E8E93' },
+  sortBtnTextActive: { color: '#5CB85C' },
+  sortBtnTextDisabled: { color: '#8E8E93' },
+  radiusRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: 16, paddingVertical: 10,
+    backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#E5E5EA',
+  },
+  radiusLabel: { fontSize: 14, fontWeight: '600', color: '#1C1C1E', marginRight: 4 },
+  radiusStepBtn: {
+    width: 34, height: 34, borderRadius: 10, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#F2F2F7', borderWidth: 1, borderColor: '#E5E5EA',
+  },
+  radiusStepText: { fontSize: 20, color: '#5CB85C', lineHeight: 24, fontWeight: '600' },
+  radiusInput: {
+    width: 44, textAlign: 'center', fontSize: 16, fontWeight: '700', color: '#1C1C1E',
+    borderWidth: 1, borderColor: '#5CB85C', borderRadius: 10,
+    paddingVertical: 5, backgroundColor: '#fff',
+  },
+  radiusMiText: { fontSize: 14, fontWeight: '600', color: '#1C1C1E' },
+  radiusMax: { fontSize: 12, color: '#8E8E93', marginLeft: 4 },
+  banner: {
+    backgroundColor: '#FFF3CD', padding: 10, paddingHorizontal: 16,
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+  },
   bannerText: { color: '#856404', fontSize: 13 },
   list: { padding: 16, gap: 12 },
   card: {
@@ -184,11 +315,13 @@ const styles = StyleSheet.create({
   },
   cardTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
   cardTitle: { fontSize: 17, fontWeight: '700', color: '#1C1C1E', flex: 1 },
-  badge: { backgroundColor: '#E6F4FE', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3 },
-  badgeText: { color: '#208AEF', fontSize: 12, fontWeight: '700' },
-  cardMeta: { fontSize: 14, color: '#8E8E93', marginTop: 3 },
+  badge: { backgroundColor: '#E8F5E9', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3 },
+  badgeText: { color: '#5CB85C', fontSize: 12, fontWeight: '700' },
+  cardMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 3 },
+  cardMeta: { fontSize: 14, color: '#8E8E93' },
   cardDistance: { fontSize: 13, color: '#34C759', marginTop: 4, fontWeight: '600' },
-  cardAttendees: { fontSize: 13, color: '#8E8E93', marginTop: 4 },
+  cardAttendeesRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 4 },
+  cardAttendees: { fontSize: 13, color: '#8E8E93' },
   empty: { alignItems: 'center', paddingTop: 60 },
   emptyIcon: { fontSize: 48, marginBottom: 12 },
   emptyText: { fontSize: 18, fontWeight: '700', color: '#1C1C1E' },

@@ -56,7 +56,7 @@ export default function MessagesScreen() {
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" color="#208AEF" />
+        <ActivityIndicator size="large" color="#5CB85C" />
       </View>
     );
   }
@@ -69,7 +69,7 @@ export default function MessagesScreen() {
         data={events}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.list}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#208AEF" />}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#5CB85C" />}
         renderItem={({ item }) => (
           <TouchableOpacity style={styles.card} onPress={() => router.push(`/chat/${item.id}` as any)}>
             <View style={styles.avatarPlaceholder}>
@@ -119,7 +119,7 @@ const styles = StyleSheet.create({
   },
   avatarPlaceholder: {
     width: 48, height: 48, borderRadius: 24,
-    backgroundColor: '#208AEF', justifyContent: 'center', alignItems: 'center', marginRight: 12,
+    backgroundColor: '#5CB85C', justifyContent: 'center', alignItems: 'center', marginRight: 12,
   },
   avatarText: { color: '#fff', fontSize: 20, fontWeight: '700' },
   cardBody: { flex: 1 },

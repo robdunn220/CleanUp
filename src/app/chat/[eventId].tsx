@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import {
   View, Text, FlatList, TextInput, TouchableOpacity,
   StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator,
+  Modal, Alert,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/auth';
+import { Avatar } from '../../components/Avatar';
 import type { Message, CleanupEvent } from '../../types';
 
 function formatTime(iso: string) {
@@ -31,25 +33,38 @@ export default function ChatScreen() {
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [reportTarget, setReportTarget] = useState<Message | null>(null);
+  const [reportNote, setReportNote] = useState('');
+  const [reporting, setReporting] = useState(false);
   const flatListRef = useRef<FlatList>(null);
 
   // Load event info and message history
   useEffect(() => {
     async function load() {
-      const [eventRes, msgRes] = await Promise.all([
+      const [eventRes, msgRes, attendeeRes] = await Promise.all([
         supabase.from('events').select('title').eq('id', eventId).single(),
         supabase
           .from('messages')
-          .select('*, profiles(id, username)')
+          .select('*, profiles(id, username, avatar_url)')
           .eq('event_id', eventId)
           .order('created_at', { ascending: true }),
+        user
+          ? supabase
+              .from('event_attendees')
+              .select('muted')
+              .eq('event_id', eventId)
+              .eq('user_id', user.id)
+              .maybeSingle()
+          : Promise.resolve({ data: null }),
       ]);
       if (eventRes.data) setEvent(eventRes.data as any);
       if (msgRes.data) setMessages(msgRes.data as Message[]);
+      setMuted(!!(attendeeRes as any).data?.muted);
       setLoading(false);
     }
     load();
-  }, [eventId]);
+  }, [eventId, user?.id]);
 
   // Realtime subscription
   useEffect(() => {
@@ -84,6 +99,32 @@ export default function ChatScreen() {
     }
   }, [messages.length]);
 
+  function openReport(msg: Message) {
+    setReportNote('');
+    setReportTarget(msg);
+  }
+
+  async function submitReport() {
+    if (!reportTarget || !user) return;
+    setReporting(true);
+    const { error } = await supabase.from('reports').insert({
+      event_id: eventId,
+      reporter_id: user.id,
+      reported_user_id: reportTarget.user_id,
+      message_id: reportTarget.id,
+      message_content: reportTarget.content,
+      note: reportNote.trim() || null,
+    });
+    setReporting(false);
+    if (error) {
+      Alert.alert('Could not submit report', error.message);
+      return;
+    }
+    setReportTarget(null);
+    setReportNote('');
+    Alert.alert('Report submitted', 'Thanks for flagging this. The organizer team will review it.');
+  }
+
   async function sendMessage() {
     if (!text.trim() || !user) return;
     setSending(true);
@@ -97,7 +138,7 @@ export default function ChatScreen() {
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" color="#208AEF" />
+        <ActivityIndicator size="large" color="#5CB85C" />
       </View>
     );
   }
@@ -148,13 +189,25 @@ export default function ChatScreen() {
           }
           const msg = item.data;
           const isMe = msg.user_id === user?.id;
+          const sender = msg.profiles as any;
+          if (isMe) {
+            return (
+              <View style={[styles.bubble, styles.bubbleMe]}>
+                <Text style={[styles.messageText, styles.messageTextMe]}>{msg.content}</Text>
+                <Text style={[styles.timestamp, styles.timestampMe]}>{formatTime(msg.created_at)}</Text>
+              </View>
+            );
+          }
           return (
-            <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem]}>
-              {!isMe && (
-                <Text style={styles.senderName}>{(msg.profiles as any)?.username ?? 'Unknown'}</Text>
-              )}
-              <Text style={[styles.messageText, isMe && styles.messageTextMe]}>{msg.content}</Text>
-              <Text style={[styles.timestamp, isMe && styles.timestampMe]}>{formatTime(msg.created_at)}</Text>
+            <View style={styles.messageRowThem}>
+              <TouchableOpacity onPress={() => openReport(msg)} accessibilityLabel={`Report ${sender?.username ?? 'user'}`}>
+                <Avatar url={sender?.avatar_url} username={sender?.username ?? ''} size={28} />
+              </TouchableOpacity>
+              <View style={[styles.bubble, styles.bubbleThem]}>
+                <Text style={styles.senderName}>{sender?.username ?? 'Unknown'}</Text>
+                <Text style={styles.messageText}>{msg.content}</Text>
+                <Text style={styles.timestamp}>{formatTime(msg.created_at)}</Text>
+              </View>
             </View>
           );
         }}
@@ -166,28 +219,85 @@ export default function ChatScreen() {
         }
       />
 
-      <View style={styles.inputBar}>
-        <TextInput
-          style={styles.textInput}
-          value={text}
-          onChangeText={setText}
-          placeholder="Message…"
-          multiline
-          maxLength={1000}
-          returnKeyType="default"
-        />
-        <TouchableOpacity
-          style={[styles.sendBtn, (!text.trim() || sending) && styles.sendBtnDisabled]}
-          onPress={sendMessage}
-          disabled={!text.trim() || sending}
-        >
-          {sending ? (
-            <ActivityIndicator size="small" color="#fff" />
-          ) : (
-            <Text style={styles.sendBtnText}>↑</Text>
-          )}
-        </TouchableOpacity>
-      </View>
+      {muted ? (
+        <View style={styles.mutedBar}>
+          <Text style={styles.mutedText}>🔇 You've been muted by the organizer.</Text>
+        </View>
+      ) : (
+        <View style={styles.inputBar}>
+          <TextInput
+            style={styles.textInput}
+            value={text}
+            onChangeText={setText}
+            placeholder="Message…"
+            multiline
+            maxLength={1000}
+            returnKeyType="default"
+          />
+          <TouchableOpacity
+            style={[styles.sendBtn, (!text.trim() || sending) && styles.sendBtnDisabled]}
+            onPress={sendMessage}
+            disabled={!text.trim() || sending}
+          >
+            {sending ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.sendBtnText}>↑</Text>
+            )}
+          </TouchableOpacity>
+        </View>
+      )}
+
+      <Modal
+        visible={!!reportTarget}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setReportTarget(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>
+              Report {(reportTarget?.profiles as any)?.username ?? 'user'}
+            </Text>
+
+            <Text style={styles.modalLabel}>Reported message</Text>
+            <View style={styles.reportedMsg}>
+              <Text style={styles.reportedMsgText}>{reportTarget?.content}</Text>
+            </View>
+
+            <Text style={styles.modalLabel}>Additional details (optional)</Text>
+            <TextInput
+              style={styles.reportInput}
+              value={reportNote}
+              onChangeText={setReportNote}
+              placeholder="Tell us what's wrong…"
+              multiline
+              maxLength={1000}
+            />
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalCancel]}
+                onPress={() => setReportTarget(null)}
+                disabled={reporting}
+              >
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalSubmit, reporting && styles.modalBtnDisabled]}
+                onPress={submitReport}
+                disabled={reporting}
+              >
+                {reporting ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.modalSubmitText}>Submit report</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -200,7 +310,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16, paddingTop: 52, paddingBottom: 12,
     backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#E5E5EA',
   },
-  backText: { fontSize: 17, color: '#208AEF', fontWeight: '600', width: 60 },
+  backText: { fontSize: 17, color: '#5CB85C', fontWeight: '600', width: 60 },
   navCenter: { flex: 1, alignItems: 'center' },
   navTitle: { fontSize: 16, fontWeight: '700', color: '#1C1C1E', maxWidth: 200 },
   navSubtitle: { fontSize: 12, color: '#8E8E93' },
@@ -210,19 +320,22 @@ const styles = StyleSheet.create({
     fontSize: 12, fontWeight: '600', color: '#8E8E93',
     backgroundColor: 'rgba(0,0,0,0.06)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10,
   },
+  messageRowThem: {
+    flexDirection: 'row', alignItems: 'flex-end', gap: 6, marginVertical: 2,
+  },
   bubble: {
-    maxWidth: '78%', borderRadius: 18, paddingHorizontal: 14, paddingVertical: 9, marginVertical: 2,
+    maxWidth: '72%', borderRadius: 18, paddingHorizontal: 14, paddingVertical: 9,
   },
   bubbleMe: {
-    alignSelf: 'flex-end', backgroundColor: '#208AEF',
-    borderBottomRightRadius: 4,
+    alignSelf: 'flex-end', backgroundColor: '#5CB85C',
+    borderBottomRightRadius: 4, marginVertical: 2,
   },
   bubbleThem: {
     alignSelf: 'flex-start', backgroundColor: '#fff',
     borderBottomLeftRadius: 4,
     shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.06, shadowRadius: 4, elevation: 1,
   },
-  senderName: { fontSize: 12, fontWeight: '700', color: '#208AEF', marginBottom: 3 },
+  senderName: { fontSize: 12, fontWeight: '700', color: '#5CB85C', marginBottom: 3 },
   messageText: { fontSize: 15, color: '#1C1C1E', lineHeight: 21 },
   messageTextMe: { color: '#fff' },
   timestamp: { fontSize: 11, color: '#8E8E93', marginTop: 3, textAlign: 'right' },
@@ -241,9 +354,40 @@ const styles = StyleSheet.create({
     maxHeight: 120,
   },
   sendBtn: {
-    width: 40, height: 40, borderRadius: 20, backgroundColor: '#208AEF',
+    width: 40, height: 40, borderRadius: 20, backgroundColor: '#5CB85C',
     justifyContent: 'center', alignItems: 'center',
   },
   sendBtnDisabled: { backgroundColor: '#C7C7CC' },
   sendBtnText: { color: '#fff', fontSize: 18, fontWeight: '800' },
+  mutedBar: {
+    backgroundColor: '#fff', paddingHorizontal: 16, paddingVertical: 16, paddingBottom: 30,
+    borderTopWidth: 1, borderTopColor: '#E5E5EA', alignItems: 'center',
+  },
+  mutedText: { fontSize: 14, color: '#8E8E93', fontWeight: '500' },
+  modalOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'center', paddingHorizontal: 24,
+  },
+  modalCard: { backgroundColor: '#fff', borderRadius: 18, padding: 20 },
+  modalTitle: { fontSize: 18, fontWeight: '800', color: '#1C1C1E', marginBottom: 14 },
+  modalLabel: {
+    fontSize: 12, fontWeight: '700', color: '#8E8E93',
+    textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6,
+  },
+  reportedMsg: {
+    backgroundColor: '#F2F2F7', borderRadius: 12, padding: 12, marginBottom: 16,
+    borderLeftWidth: 3, borderLeftColor: '#5CB85C',
+  },
+  reportedMsgText: { fontSize: 14, color: '#1C1C1E', lineHeight: 20 },
+  reportInput: {
+    backgroundColor: '#F2F2F7', borderRadius: 12, padding: 12, fontSize: 15,
+    color: '#1C1C1E', minHeight: 70, textAlignVertical: 'top', marginBottom: 18,
+  },
+  modalActions: { flexDirection: 'row', gap: 10 },
+  modalBtn: { flex: 1, borderRadius: 12, paddingVertical: 13, alignItems: 'center' },
+  modalBtnDisabled: { opacity: 0.6 },
+  modalCancel: { backgroundColor: '#F2F2F7' },
+  modalCancelText: { fontSize: 15, fontWeight: '700', color: '#1C1C1E' },
+  modalSubmit: { backgroundColor: '#FF3B30' },
+  modalSubmitText: { fontSize: 15, fontWeight: '700', color: '#fff' },
 });

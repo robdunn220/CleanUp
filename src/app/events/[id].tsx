@@ -4,9 +4,11 @@ import {
   Alert, ActivityIndicator,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/auth';
-import type { CleanupEvent, Profile } from '../../types';
+import { Avatar } from '../../components/Avatar';
+import type { CleanupEvent, Profile, AttendeeRow } from '../../types';
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString('en-US', {
@@ -21,7 +23,7 @@ export default function EventDetailScreen() {
   const router = useRouter();
   const [event, setEvent] = useState<CleanupEvent | null>(null);
   const [organizer, setOrganizer] = useState<Profile | null>(null);
-  const [attendees, setAttendees] = useState<Profile[]>([]);
+  const [attendees, setAttendees] = useState<AttendeeRow[]>([]);
   const [isAttending, setIsAttending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [joining, setJoining] = useState(false);
@@ -29,10 +31,10 @@ export default function EventDetailScreen() {
   useEffect(() => {
     async function load() {
       const [eventRes, attendeesRes] = await Promise.all([
-        supabase.from('events').select('*, profiles(*)').eq('id', id).single(),
+        supabase.from('events').select('*, profiles!created_by(*)').eq('id', id).single(),
         supabase
           .from('event_attendees')
-          .select('user_id, profiles(id, username)')
+          .select('user_id, muted, profiles(id, username, avatar_url)')
           .eq('event_id', id),
       ]);
 
@@ -42,8 +44,10 @@ export default function EventDetailScreen() {
       }
 
       if (attendeesRes.data) {
-        const profiles = attendeesRes.data.map((r: any) => r.profiles).filter(Boolean);
-        setAttendees(profiles);
+        const rows: AttendeeRow[] = attendeesRes.data
+          .filter((r: any) => r.profiles)
+          .map((r: any) => ({ profile: r.profiles as Profile, muted: !!r.muted }));
+        setAttendees(rows);
         setIsAttending(attendeesRes.data.some((r: any) => r.user_id === user?.id));
       }
 
@@ -66,7 +70,7 @@ export default function EventDetailScreen() {
       if (error) Alert.alert('Error', error.message);
       else {
         setIsAttending(false);
-        setAttendees((a) => a.filter((p) => p.id !== user.id));
+        setAttendees((a) => a.filter((r) => r.profile.id !== user.id));
       }
     } else {
       const { error } = await supabase
@@ -77,10 +81,61 @@ export default function EventDetailScreen() {
         setIsAttending(true);
         // Fetch current user profile to add to attendees list
         const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single();
-        if (data) setAttendees((a) => [...a, data as Profile]);
+        if (data) setAttendees((a) => [...a, { profile: data as Profile, muted: false }]);
       }
     }
     setJoining(false);
+  }
+
+  // Organizer-only: silence an attendee in the event chat (server enforces it via RLS).
+  async function toggleMute(attendee: AttendeeRow) {
+    if (!event) return;
+    const next = !attendee.muted;
+    // Optimistic update.
+    setAttendees((a) =>
+      a.map((r) => (r.profile.id === attendee.profile.id ? { ...r, muted: next } : r)),
+    );
+    const { error } = await supabase
+      .from('event_attendees')
+      .update({ muted: next })
+      .eq('event_id', event.id)
+      .eq('user_id', attendee.profile.id);
+    if (error) {
+      Alert.alert('Error', error.message);
+      // Roll back on failure.
+      setAttendees((a) =>
+        a.map((r) => (r.profile.id === attendee.profile.id ? { ...r, muted: attendee.muted } : r)),
+      );
+    }
+  }
+
+  // Organizer-only: remove an attendee from the event entirely.
+  function removeAttendee(attendee: AttendeeRow) {
+    if (!event) return;
+    Alert.alert(
+      'Remove attendee',
+      `Remove ${attendee.profile.username} from this event? They can rejoin unless the event is full.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            const prev = attendees;
+            setAttendees((a) => a.filter((r) => r.profile.id !== attendee.profile.id));
+            const { error } = await supabase
+              .from('event_attendees')
+              .delete()
+              .eq('event_id', event.id)
+              .eq('user_id', attendee.profile.id);
+            if (error) {
+              Alert.alert('Error', error.message);
+              setAttendees(prev);
+            }
+          },
+        },
+      ],
+    );
   }
 
   async function deleteEvent() {
@@ -100,7 +155,7 @@ export default function EventDetailScreen() {
   if (loading || !event) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" color="#208AEF" />
+        <ActivityIndicator size="large" color="#5CB85C" />
       </View>
     );
   }
@@ -122,12 +177,12 @@ export default function EventDetailScreen() {
         <Text style={styles.title}>{event.title}</Text>
 
         <View style={styles.metaCard}>
-          <MetaRow icon="📅" label="Date & Time" value={formatDate(event.date)} />
-          <MetaRow icon="📍" label="Location" value={event.location_name} />
-          {organizer && <MetaRow icon="👤" label="Organizer" value={organizer.username} />}
+          <MetaRow ionicon="calendar" label="Date & Time" value={formatDate(event.date)} />
+          <MetaRow ionicon="location" label="Location" value={event.location_name} />
+          {organizer && <MetaRow ionicon="person" label="Organizer" value={organizer.username} />}
           {event.max_attendees && (
             <MetaRow
-              icon="👥"
+              ionicon="people"
               label="Capacity"
               value={`${attendees.length} / ${event.max_attendees} spots filled`}
             />
@@ -144,14 +199,54 @@ export default function EventDetailScreen() {
         {attendees.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Attendees ({attendees.length})</Text>
-            <View style={styles.attendeeList}>
-              {attendees.map((p) => (
-                <View key={p.id} style={styles.attendeeChip}>
-                  <Text style={styles.attendeeInitial}>{p.username.charAt(0).toUpperCase()}</Text>
-                  <Text style={styles.attendeeName}>{p.username}</Text>
-                </View>
-              ))}
-            </View>
+
+            {isOrganizer ? (
+              <View style={styles.manageList}>
+                {attendees.map(({ profile, muted }) => {
+                  const attendee = { profile, muted };
+                  const isSelf = profile.id === user?.id;
+                  return (
+                    <View key={profile.id} style={styles.manageRow}>
+                      <Avatar url={profile.avatar_url} username={profile.username} size={32} />
+                      <Text style={styles.manageName} numberOfLines={1}>
+                        {profile.username}
+                        {muted ? ' 🔇' : ''}
+                      </Text>
+                      {!isSelf && (
+                        <View style={styles.manageActions}>
+                          <TouchableOpacity
+                            style={[styles.manageBtn, muted ? styles.unmuteBtn : styles.muteBtn]}
+                            onPress={() => toggleMute(attendee)}
+                          >
+                            <Text style={muted ? styles.unmuteBtnText : styles.muteBtnText}>
+                              {muted ? 'Unmute' : 'Mute'}
+                            </Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[styles.manageBtn, styles.removeBtn]}
+                            onPress={() => removeAttendee(attendee)}
+                          >
+                            <Text style={styles.removeBtnText}>Remove</Text>
+                          </TouchableOpacity>
+                        </View>
+                      )}
+                    </View>
+                  );
+                })}
+              </View>
+            ) : (
+              <View style={styles.attendeeList}>
+                {attendees.map(({ profile, muted }) => (
+                  <View key={profile.id} style={styles.attendeeChip}>
+                    <Avatar url={profile.avatar_url} username={profile.username} size={24} />
+                    <Text style={styles.attendeeName}>
+                      {profile.username}
+                      {muted ? ' 🔇' : ''}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            )}
           </View>
         )}
       </ScrollView>
@@ -190,10 +285,24 @@ export default function EventDetailScreen() {
   );
 }
 
-function MetaRow({ icon, label, value }: { icon: string; label: string; value: string }) {
+function MetaRow({
+  icon,
+  ionicon,
+  label,
+  value,
+}: {
+  icon?: string;
+  ionicon?: keyof typeof Ionicons.glyphMap;
+  label: string;
+  value: string;
+}) {
   return (
     <View style={styles.metaRow}>
-      <Text style={styles.metaIcon}>{icon}</Text>
+      {ionicon ? (
+        <Ionicons name={ionicon} size={19} color="#5CB85C" style={styles.metaIcon} />
+      ) : (
+        <Text style={styles.metaIcon}>{icon}</Text>
+      )}
       <View>
         <Text style={styles.metaLabel}>{label}</Text>
         <Text style={styles.metaValue}>{value}</Text>
@@ -211,7 +320,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#E5E5EA',
   },
   backBtn: {},
-  backText: { fontSize: 17, color: '#208AEF', fontWeight: '600' },
+  backText: { fontSize: 17, color: '#5CB85C', fontWeight: '600' },
   deleteText: { fontSize: 15, color: '#FF3B30', fontWeight: '600' },
   content: { padding: 16, gap: 16, paddingBottom: 32 },
   title: { fontSize: 26, fontWeight: '800', color: '#1C1C1E', lineHeight: 32 },
@@ -236,11 +345,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 6,
     backgroundColor: '#F2F2F7', borderRadius: 20, paddingHorizontal: 10, paddingVertical: 6,
   },
-  attendeeInitial: {
-    width: 24, height: 24, borderRadius: 12, backgroundColor: '#208AEF',
-    color: '#fff', fontSize: 12, fontWeight: '700', textAlign: 'center', lineHeight: 24,
-  },
   attendeeName: { fontSize: 13, fontWeight: '600', color: '#1C1C1E' },
+  manageList: { gap: 10 },
+  manageRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  manageName: { flex: 1, fontSize: 15, fontWeight: '600', color: '#1C1C1E' },
+  manageActions: { flexDirection: 'row', gap: 8 },
+  manageBtn: { borderRadius: 14, paddingHorizontal: 12, paddingVertical: 6 },
+  muteBtn: { backgroundColor: '#F2F2F7' },
+  muteBtnText: { fontSize: 13, fontWeight: '600', color: '#1C1C1E' },
+  unmuteBtn: { backgroundColor: '#E8F5E9' },
+  unmuteBtnText: { fontSize: 13, fontWeight: '600', color: '#5CB85C' },
+  removeBtn: { backgroundColor: '#FFF0F0' },
+  removeBtnText: { fontSize: 13, fontWeight: '600', color: '#FF3B30' },
   footer: {
     backgroundColor: '#fff', paddingHorizontal: 16, paddingVertical: 12,
     paddingBottom: 28, borderTopWidth: 1, borderTopColor: '#E5E5EA', gap: 10,
@@ -248,7 +364,7 @@ const styles = StyleSheet.create({
   footerBtn: { borderRadius: 14, paddingVertical: 14, alignItems: 'center' },
   chatBtn: { backgroundColor: '#F2F2F7' },
   chatBtnText: { color: '#1C1C1E', fontWeight: '700', fontSize: 16 },
-  joinBtn: { backgroundColor: '#208AEF' },
+  joinBtn: { backgroundColor: '#5CB85C' },
   joinBtnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
   leaveBtn: { backgroundColor: '#FFF0F0' },
   leaveBtnText: { color: '#FF3B30', fontWeight: '700', fontSize: 16 },

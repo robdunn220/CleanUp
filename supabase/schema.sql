@@ -74,8 +74,12 @@ CREATE TABLE IF NOT EXISTS event_attendees (
   event_id UUID REFERENCES events(id) ON DELETE CASCADE,
   user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
   joined_at TIMESTAMPTZ DEFAULT NOW(),
+  muted BOOLEAN NOT NULL DEFAULT false,
   PRIMARY KEY (event_id, user_id)
 );
+
+-- For existing databases: add the muted flag if it isn't there yet.
+ALTER TABLE event_attendees ADD COLUMN IF NOT EXISTS muted BOOLEAN NOT NULL DEFAULT false;
 
 ALTER TABLE event_attendees ENABLE ROW LEVEL SECURITY;
 
@@ -88,18 +92,43 @@ CREATE POLICY "Users can join events" ON event_attendees
 CREATE POLICY "Users can leave events" ON event_attendees
   FOR DELETE USING (auth.uid() = user_id);
 
+-- Event creators can mute/unmute attendees (the only column they may change).
+DROP POLICY IF EXISTS "Event creators can mute attendees" ON event_attendees;
+CREATE POLICY "Event creators can mute attendees" ON event_attendees
+  FOR UPDATE USING (
+    EXISTS (
+      SELECT 1 FROM events
+      WHERE id = event_attendees.event_id AND created_by = auth.uid()
+    )
+  );
+
+-- Event creators can remove attendees from their own event.
+DROP POLICY IF EXISTS "Event creators can remove attendees" ON event_attendees;
+CREATE POLICY "Event creators can remove attendees" ON event_attendees
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM events
+      WHERE id = event_attendees.event_id AND created_by = auth.uid()
+    )
+  );
+
 -- Messages (event group chats)
 CREATE TABLE IF NOT EXISTS messages (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   event_id UUID REFERENCES events(id) ON DELETE CASCADE NOT NULL,
   user_id UUID REFERENCES profiles(id) ON DELETE CASCADE NOT NULL,
-  content TEXT NOT NULL,
+  content TEXT NOT NULL CHECK (char_length(content) BETWEEN 1 AND 1000),
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- For existing databases: enforce the same length bound server-side.
+ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_content_length;
+ALTER TABLE messages ADD CONSTRAINT messages_content_length
+  CHECK (char_length(content) BETWEEN 1 AND 1000);
+
 ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
 
--- Anyone attending or owning the event can read/send messages
+-- Anyone attending or owning the event can read messages
 CREATE POLICY "Messages viewable by participants" ON messages
   FOR SELECT USING (
     EXISTS (
@@ -112,12 +141,14 @@ CREATE POLICY "Messages viewable by participants" ON messages
     )
   );
 
+-- Attendees (unless muted) and the event creator can send messages.
+DROP POLICY IF EXISTS "Participants can send messages" ON messages;
 CREATE POLICY "Participants can send messages" ON messages
   FOR INSERT WITH CHECK (
     auth.uid() = user_id AND (
       EXISTS (
         SELECT 1 FROM event_attendees
-        WHERE event_id = messages.event_id AND user_id = auth.uid()
+        WHERE event_id = messages.event_id AND user_id = auth.uid() AND NOT muted
       ) OR
       EXISTS (
         SELECT 1 FROM events
@@ -126,5 +157,57 @@ CREATE POLICY "Participants can send messages" ON messages
     )
   );
 
+-- Senders can delete their own messages; event creators can moderate any.
+DROP POLICY IF EXISTS "Senders and creators can delete messages" ON messages;
+CREATE POLICY "Senders and creators can delete messages" ON messages
+  FOR DELETE USING (
+    auth.uid() = user_id OR
+    EXISTS (
+      SELECT 1 FROM events
+      WHERE id = messages.event_id AND created_by = auth.uid()
+    )
+  );
+
 -- Enable realtime for messages
 ALTER PUBLICATION supabase_realtime ADD TABLE messages;
+
+-- User reports (flag a user / message for the app owner to review)
+CREATE TABLE IF NOT EXISTS reports (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  event_id UUID REFERENCES events(id) ON DELETE SET NULL,
+  reporter_id UUID REFERENCES profiles(id) ON DELETE CASCADE NOT NULL,
+  reported_user_id UUID REFERENCES profiles(id) ON DELETE CASCADE NOT NULL,
+  message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
+  message_content TEXT,
+  note TEXT CHECK (note IS NULL OR char_length(note) <= 1000),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE reports ENABLE ROW LEVEL SECURITY;
+
+-- Authenticated users can file a report as themselves; they can't report themselves.
+DROP POLICY IF EXISTS "Users can submit reports" ON reports;
+CREATE POLICY "Users can submit reports" ON reports
+  FOR INSERT WITH CHECK (auth.uid() = reporter_id AND reporter_id <> reported_user_id);
+
+-- Reporters can see the reports they filed (you, the owner, view all via the dashboard).
+DROP POLICY IF EXISTS "Reporters can view their own reports" ON reports;
+CREATE POLICY "Reporters can view their own reports" ON reports
+  FOR SELECT USING (auth.uid() = reporter_id);
+
+-- Avatar storage bucket
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('avatars', 'avatars', true)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE POLICY "Avatars are publicly accessible"
+  ON storage.objects FOR SELECT
+  USING (bucket_id = 'avatars');
+
+CREATE POLICY "Users can upload their own avatar"
+  ON storage.objects FOR INSERT
+  WITH CHECK (bucket_id = 'avatars' AND auth.uid()::text = name);
+
+CREATE POLICY "Users can update their own avatar"
+  ON storage.objects FOR UPDATE
+  USING (bucket_id = 'avatars' AND auth.uid()::text = name);

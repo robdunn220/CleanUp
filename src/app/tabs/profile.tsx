@@ -3,8 +3,10 @@ import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   ScrollView, Alert, ActivityIndicator,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/auth';
+import { Avatar } from '../../components/Avatar';
 import type { Profile } from '../../types';
 
 export default function ProfileScreen() {
@@ -12,6 +14,7 @@ export default function ProfileScreen() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [editing, setEditing] = useState(false);
   const [username, setUsername] = useState('');
   const [bio, setBio] = useState('');
@@ -32,6 +35,75 @@ export default function ProfileScreen() {
         setLoading(false);
       });
   }, [user]);
+
+  function pickAvatar() {
+    Alert.alert('Profile Photo', 'Choose a source', [
+      { text: 'Take Photo', onPress: captureAvatar },
+      { text: 'Choose from Library', onPress: pickFromLibrary },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }
+
+  async function captureAvatar() {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission needed', 'Please allow camera access.');
+      return;
+    }
+    const result = await ImagePicker.launchCameraAsync({
+      allowsEditing: true, aspect: [1, 1], quality: 0.7, base64: true,
+    });
+    if (!result.canceled) uploadAvatar(result.assets[0]);
+  }
+
+  async function pickFromLibrary() {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission needed', 'Please allow access to your photo library.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'], allowsEditing: true, aspect: [1, 1], quality: 0.7, base64: true,
+    });
+    if (!result.canceled) uploadAvatar(result.assets[0]);
+  }
+
+  async function uploadAvatar(asset: ImagePicker.ImagePickerAsset) {
+    if (!user) return;
+    setUploading(true);
+    try {
+      const mimeType = asset.mimeType ?? 'image/jpeg';
+      if (!asset.base64) throw new Error('No image data returned.');
+
+      // React Native cannot create Blobs from ArrayBuffers or fetch data: URIs on Android.
+      // Decode base64 → ArrayBuffer manually and upload that directly.
+      const binary = atob(asset.base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+      const { error: uploadError } = await supabase.storage
+        .from('avatars')
+        .upload(user.id, bytes.buffer, { contentType: mimeType, upsert: true });
+
+      if (uploadError) throw uploadError;
+
+      const { data: urlData } = supabase.storage.from('avatars').getPublicUrl(user.id);
+      const avatarUrl = `${urlData.publicUrl}?v=${Date.now()}`;
+
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({ avatar_url: avatarUrl })
+        .eq('id', user.id);
+
+      if (updateError) throw updateError;
+
+      setProfile((p) => p ? { ...p, avatar_url: avatarUrl } : p);
+    } catch (err: any) {
+      Alert.alert('Upload failed', err.message ?? 'Something went wrong.');
+    } finally {
+      setUploading(false);
+    }
+  }
 
   async function saveProfile() {
     if (!user) return;
@@ -63,7 +135,7 @@ export default function ProfileScreen() {
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" color="#208AEF" />
+        <ActivityIndicator size="large" color="#5CB85C" />
       </View>
     );
   }
@@ -72,11 +144,19 @@ export default function ProfileScreen() {
     <ScrollView style={styles.root} contentContainerStyle={styles.content}>
       <Text style={styles.header}>Profile</Text>
 
-      <View style={styles.avatar}>
-        <Text style={styles.avatarText}>
-          {(profile?.username ?? user?.email ?? '?').charAt(0).toUpperCase()}
-        </Text>
-      </View>
+      <TouchableOpacity style={styles.avatarWrapper} onPress={pickAvatar} disabled={uploading}>
+        <Avatar
+          url={profile?.avatar_url}
+          username={profile?.username ?? user?.email ?? ''}
+          size={84}
+        />
+        <View style={styles.cameraOverlay}>
+          {uploading
+            ? <ActivityIndicator size="small" color="#fff" />
+            : <Text style={styles.cameraIcon}>📷</Text>
+          }
+        </View>
+      </TouchableOpacity>
 
       <View style={styles.card}>
         <FieldRow label="Username">
@@ -172,12 +252,16 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#E5E5EA',
     marginBottom: 20,
   },
-  avatar: {
-    width: 84, height: 84, borderRadius: 42,
-    backgroundColor: '#208AEF', alignSelf: 'center',
-    justifyContent: 'center', alignItems: 'center', marginBottom: 20,
+  avatarWrapper: {
+    alignSelf: 'center', marginBottom: 20, width: 84, height: 84,
   },
-  avatarText: { color: '#fff', fontSize: 36, fontWeight: '800' },
+  cameraOverlay: {
+    position: 'absolute', bottom: 0, right: 0,
+    width: 26, height: 26, borderRadius: 13,
+    backgroundColor: '#1C1C1E', justifyContent: 'center', alignItems: 'center',
+    borderWidth: 2, borderColor: '#F2F2F7',
+  },
+  cameraIcon: { fontSize: 12 },
   card: {
     backgroundColor: '#fff', borderRadius: 16, marginHorizontal: 16,
     shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
@@ -199,11 +283,11 @@ const styles = StyleSheet.create({
     borderRadius: 14, paddingVertical: 14, alignItems: 'center',
     marginHorizontal: 16, marginTop: 12,
   },
-  editBtn: { backgroundColor: '#208AEF' },
+  editBtn: { backgroundColor: '#5CB85C' },
   editBtnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
   cancelBtn: { flex: 1, backgroundColor: '#F2F2F7', marginHorizontal: 0 },
   cancelBtnText: { color: '#1C1C1E', fontWeight: '600', fontSize: 16 },
-  saveBtn: { flex: 1, backgroundColor: '#208AEF', marginHorizontal: 0 },
+  saveBtn: { flex: 1, backgroundColor: '#5CB85C', marginHorizontal: 0 },
   saveBtnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
   btnDisabled: { opacity: 0.6 },
   signOutBtn: { backgroundColor: '#FFF0F0', marginTop: 8 },

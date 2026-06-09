@@ -5,23 +5,9 @@ import {
 } from 'react-native';
 import { Calendar } from 'react-native-calendars';
 import { useRouter } from 'expo-router';
-import * as Location from 'expo-location';
 import { supabase } from '../../lib/supabase';
+import { useAuth } from '../../contexts/auth';
 import type { CleanupEvent } from '../../types';
-
-const RADIUS_KM = 80;
-
-function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
 
 function toDateStr(iso: string) {
   return iso.slice(0, 10);
@@ -32,52 +18,59 @@ function formatTime(iso: string) {
 }
 
 export default function CalendarScreen() {
+  const { user } = useAuth();
   const router = useRouter();
   const [events, setEvents] = useState<CleanupEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedDate, setSelectedDate] = useState(toDateStr(new Date().toISOString()));
-  const [location, setLocation] = useState<{ lat: number; lon: number } | null>(null);
+
+  const fetchMyEvents = useCallback(async () => {
+    if (!user) return;
+
+    const now = new Date().toISOString();
+
+    // Get event IDs the user is attending
+    const { data: attendeeRows } = await supabase
+      .from('event_attendees')
+      .select('event_id')
+      .eq('user_id', user.id);
+
+    const attendingIds = (attendeeRows ?? []).map((r: any) => r.event_id);
+
+    const [createdRes, joinedRes] = await Promise.all([
+      supabase.from('events').select('*').eq('created_by', user.id).gte('date', now).order('date', { ascending: true }),
+      attendingIds.length > 0
+        ? supabase.from('events').select('*').in('id', attendingIds).gte('date', now).order('date', { ascending: true })
+        : Promise.resolve({ data: [] as any[] }),
+    ]);
+
+    const all = [...(createdRes.data ?? []), ...((joinedRes as any).data ?? [])];
+    const seen = new Set<string>();
+    const deduped = all.filter((e) => {
+      if (seen.has(e.id)) return false;
+      seen.add(e.id);
+      return true;
+    });
+
+    deduped.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    setEvents(deduped as CleanupEvent[]);
+  }, [user]);
 
   useEffect(() => {
-    (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status === 'granted') {
-        const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-        setLocation({ lat: loc.coords.latitude, lon: loc.coords.longitude });
-      }
-    })();
-  }, []);
-
-  const fetchEvents = useCallback(async () => {
-    const { data } = await supabase
-      .from('events')
-      .select('*')
-      .order('date', { ascending: true });
-
-    if (!data) return;
-
-    const nearby = location
-      ? data.filter((e) => haversineKm(location.lat, location.lon, e.latitude, e.longitude) <= RADIUS_KM)
-      : data;
-
-    setEvents(nearby as CleanupEvent[]);
-  }, [location]);
-
-  useEffect(() => {
-    fetchEvents().finally(() => setLoading(false));
-  }, [fetchEvents]);
+    fetchMyEvents().finally(() => setLoading(false));
+  }, [fetchMyEvents]);
 
   const markedDates: Record<string, any> = {};
   events.forEach((e) => {
     const d = toDateStr(e.date);
     markedDates[d] = {
       marked: true,
-      dotColor: '#208AEF',
-      ...(d === selectedDate ? { selected: true, selectedColor: '#208AEF' } : {}),
+      dotColor: '#5CB85C',
+      ...(d === selectedDate ? { selected: true, selectedColor: '#5CB85C' } : {}),
     };
   });
   if (!markedDates[selectedDate]) {
-    markedDates[selectedDate] = { selected: true, selectedColor: '#208AEF' };
+    markedDates[selectedDate] = { selected: true, selectedColor: '#5CB85C' };
   }
 
   const dayEvents = events.filter((e) => toDateStr(e.date) === selectedDate);
@@ -85,23 +78,23 @@ export default function CalendarScreen() {
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" color="#208AEF" />
+        <ActivityIndicator size="large" color="#5CB85C" />
       </View>
     );
   }
 
   return (
     <View style={styles.root}>
-      <Text style={styles.header}>Calendar</Text>
+      <Text style={styles.header}>My Calendar</Text>
 
       <Calendar
         onDayPress={(day: { dateString: string }) => setSelectedDate(day.dateString)}
         markedDates={markedDates}
         theme={{
-          todayTextColor: '#208AEF',
-          arrowColor: '#208AEF',
-          selectedDayBackgroundColor: '#208AEF',
-          dotColor: '#208AEF',
+          todayTextColor: '#5CB85C',
+          arrowColor: '#5CB85C',
+          selectedDayBackgroundColor: '#5CB85C',
+          dotColor: '#5CB85C',
           textDayFontWeight: '500',
           textMonthFontWeight: '700',
           textDayHeaderFontWeight: '600',
@@ -134,7 +127,9 @@ export default function CalendarScreen() {
         )}
         ListEmptyComponent={
           <View style={styles.empty}>
-            <Text style={styles.emptyText}>No cleanups scheduled. Tap + Create on the Events tab to add one!</Text>
+            <Text style={styles.emptyText}>
+              No cleanups on this day. Join or create events to see them here.
+            </Text>
           </View>
         }
       />
@@ -167,7 +162,7 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   timeCol: { width: 60, marginRight: 12 },
-  time: { fontSize: 13, fontWeight: '700', color: '#208AEF' },
+  time: { fontSize: 13, fontWeight: '700', color: '#5CB85C' },
   cardBody: { flex: 1 },
   cardTitle: { fontSize: 15, fontWeight: '700', color: '#1C1C1E' },
   cardLocation: { fontSize: 13, color: '#8E8E93', marginTop: 2 },
